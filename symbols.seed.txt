@@ -1,0 +1,28 @@
+# One ticker per line. Lines starting with # are ignored.
+# Starter set of large caps; use `backfill -fetch-symbols` to pull the full universe.
+ACB
+BID
+BVH
+CTG
+FPT
+GAS
+GVR
+HPG
+MBB
+MSN
+MWG
+PLX
+PNJ
+POW
+SAB
+SSI
+STB
+TCB
+TPB
+VCB
+VHM
+VIC
+VJC
+VNM
+VPB
+VRE
