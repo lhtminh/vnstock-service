@@ -48,11 +48,13 @@ internal/store/  Postgres schema + pgx upserts
    ```bash
    py -3.11 -m venv .venv                     # Windows; use python3.11 elsewhere
    .venv/Scripts/python -m pip install -U pip
-   .venv/Scripts/python -m pip install vnstock
+   .venv/Scripts/python -m pip install -r requirements.txt
    ```
 
    The Go provider auto-discovers `./.venv` when run from the repo root. To point
    at a different interpreter or script, set `VNSTOCK_PYTHON` / `VNSTOCK_SCRIPT`.
+   `.venv/` is git-ignored — keep it locally, recreate it from `requirements.txt`;
+   don't commit it.
 
 2. **Postgres** (Docker is easiest):
 

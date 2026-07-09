@@ -1,0 +1,16 @@
+# Python virtualenv (kept locally, never committed — recreate with requirements.txt)
+.venv/
+__pycache__/
+*.pyc
+
+# Go build artifacts
+*.exe
+/vnstock-service
+/backfill
+/update
+
+# Local env / secrets
+.env
+
+# Scratch / helper output
+*.log
