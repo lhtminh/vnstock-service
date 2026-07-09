@@ -38,8 +38,12 @@ func main() {
 		log.Fatal("no symbols in database — run the backfill command first")
 	}
 
+	vnstk, err := provider.NewVNStock()
+	must(err)
 	client := httpx.New(*reqPerSec, 4)
+	// vnstock (VCI) is primary; TCBS/VNDirect remain as (currently dead) fallbacks.
 	src := provider.NewChain(
+		vnstk,
 		provider.NewTCBS(client),
 		provider.NewVNDirect(client),
 	)

@@ -38,20 +38,24 @@ func main() {
 	defer st.Close()
 	must(st.EnsureSchema(ctx))
 
+	vnstk, err := provider.NewVNStock()
+	must(err)
 	client := httpx.New(*reqPerSec, 4)
-	vnd := provider.NewVNDirect(client)
+	// vnstock (VCI) is primary; the direct TCBS/VNDirect HTTP providers are kept
+	// as fallbacks but are currently non-functional (see README).
 	src := provider.NewChain(
+		vnstk,
 		provider.NewTCBS(client),
-		vnd,
+		provider.NewVNDirect(client),
 	)
 
 	syms, err := st.ListSymbols(ctx)
 	must(err)
 	if len(syms) == 0 {
 		if *fetchSymbols {
-			syms, err = vnd.ListSymbols(ctx)
+			syms, err = vnstk.ListSymbols(ctx)
 			must(err)
-			log.Printf("fetched %d symbols from VNDirect", len(syms))
+			log.Printf("fetched %d symbols from vnstock", len(syms))
 		} else {
 			syms = loadSeed(*seed)
 			log.Printf("loaded %d symbols from %s", len(syms), *seed)

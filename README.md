@@ -1,74 +1,112 @@
 # vnstock-service
 
-Fetches Vietnamese daily stock history (OHLCV) from multiple broker APIs and
-stores it in Postgres. Go + pgx. One-time **backfill** + daily **update**.
+Fetches Vietnamese daily stock history (OHLCV) and stores it in Postgres.
+Go + pgx for orchestration/storage; data is sourced through the maintained
+[`vnstock`](https://github.com/thinh-vu/vnstock) Python library. One-time
+**backfill** + daily **update**.
+
+## Why the Python bridge
+
+The service originally called the TCBS and VNDirect JSON endpoints directly from
+Go. Both are now unusable:
+
+- **TCBS** (`apipubaws.tcbs.com.vn`) IP-blocks non-allowlisted egress — every
+  route returns a blanket `404 {"message":"Service not found"}`.
+- **VNDirect** (`finfo-api.vndirect.com.vn`) was decommissioned — the hostname
+  resolves to a private `10.x` address even via public DNS, so it is
+  unreachable from the internet.
+
+So daily bars now come from **VCI (Vietcap)** via `vnstock`, which is still
+reachable. The Go `Provider` interface is unchanged: `internal/provider/vnstock.go`
+shells out to `python/fetch.py`, which returns JSON that decodes into `[]Bar`.
+The old `tcbs.go` / `vndirect.go` remain in the chain as (currently dead)
+fallbacks so the moment either recovers it is used again automatically.
 
 ## Layout
 
 ```
 cmd/backfill/    one-time full history load
 cmd/update/      incremental daily refresh (run from cron)
+python/
+    fetch.py     vnstock bridge: emits OHLCV / symbol-universe JSON
 internal/httpx/  shared HTTP client: global rate limit + retry/backoff
 internal/provider/
     provider.go  the Provider interface + Bar/Symbol types
-    tcbs.go      primary source (VND prices, deep history)
-    vndirect.go  fallback source + full-universe symbol listing
+    vnstock.go   PRIMARY source — bridges to python/fetch.py (VCI/Vietcap)
+    tcbs.go      legacy HTTP source (currently IP-blocked)
+    vndirect.go  legacy HTTP source + symbol listing (currently decommissioned)
     chain.go     fallback chain across providers
 internal/store/  Postgres schema + pgx upserts
 ```
 
 ## Setup
 
-1. Postgres (Docker is easiest):
+1. **Python 3.11 environment with vnstock.** Use 3.11 (or 3.10/3.12) — do NOT
+   use 3.14 yet: its only Windows numpy build is an experimental MinGW wheel
+   that segfaults on import.
+
+   ```bash
+   py -3.11 -m venv .venv                     # Windows; use python3.11 elsewhere
+   .venv/Scripts/python -m pip install -U pip
+   .venv/Scripts/python -m pip install vnstock
+   ```
+
+   The Go provider auto-discovers `./.venv` when run from the repo root. To point
+   at a different interpreter or script, set `VNSTOCK_PYTHON` / `VNSTOCK_SCRIPT`.
+
+2. **Postgres** (Docker is easiest):
 
    ```bash
    docker run --name vnstock-pg -e POSTGRES_PASSWORD=postgres \
      -e POSTGRES_DB=vnstock -p 5432:5432 -d postgres:16
-   ```
-
-2. Point the app at it:
-
-   ```bash
    export DATABASE_URL='postgres://postgres:postgres@localhost:5432/vnstock?sslmode=disable'
    ```
 
-3. Pull deps:
+3. **Go deps:**
 
    ```bash
    go mod tidy
    ```
 
-## Verify the endpoints FIRST
+## Verify the source FIRST
 
-These are public/unofficial broker APIs; field names and units drift. Confirm
-each once before a big run:
+`vnstock` wraps unofficial broker feeds; field names and units drift. Confirm
+once before a big run (from the repo root):
 
 ```bash
-# TCBS — prices should be in VND (e.g. FPT ~ 100000+)
-curl 'https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker=FPT&type=stock&resolution=D&to=1720000000&countBack=5'
-
-# VNDirect — check whether open/high/low/close are in VND or thousands
-curl 'https://finfo-api.vndirect.com.vn/v4/stock_prices/?sort=date&size=5&page=1&q=code:FPT~date:gte:2024-01-01~date:lte:2024-02-01'
+.venv/Scripts/python python/fetch.py history --symbol FPT \
+  --start 2024-01-02 --end 2024-01-10 --out fpt.json && cat fpt.json
 ```
 
-If VNDirect prices look like `100.5` instead of `100500`, set
-`vndPriceScale = 1000` in `internal/provider/vndirect.go`.
+Sanity checks:
+- **Units.** `close` for FPT should be ~`70000` (VND), not ~`70`. VCI quotes in
+  *thousands*; `fetch.py` multiplies by `PRICE_SCALE = 1000`. If a future
+  vnstock/VCI change alters this, adjust `PRICE_SCALE`.
+- **Adjustment.** VCI `history` returns **split/dividend-ADJUSTED** prices, not
+  raw traded prices (see Gotchas).
 
 ## Run
+
+Run from the repo root so the provider finds `./.venv` and `python/fetch.py`.
 
 ```bash
 # Backfill from the seed file (26 blue chips):
 go run ./cmd/backfill -from 2005-01-01
 
-# Or backfill the full listed universe (~1700 tickers):
+# Or backfill the full listed universe (~1500 tickers, from vnstock):
 go run ./cmd/backfill -fetch-symbols -from 2005-01-01
 
-# Daily incremental (put this in cron after market close, ~15:30 ICT):
+# Daily incremental (cron, after market close ~15:30 ICT):
 go run ./cmd/update
 ```
 
-Tunables on both commands: `-workers` (concurrent symbols), `-rps` (global
-requests/sec — keep this low, ~5, to avoid IP throttling).
+Tunables: `-workers` (concurrent symbols) and `-rps`. **Note:** the vnstock path
+does not use the shared rate-limited HTTP client — each symbol spawns a
+short-lived Python process, so its request rate is bounded by `-workers`, not
+`-rps` (`-rps` still governs the legacy TCBS/VNDirect fallbacks). Keep
+`-workers` modest (≈3–6) to avoid VCI throttling and hold memory down; a
+full-universe backfill pays a per-symbol Python startup cost, so expect it to be
+slow (fine as an overnight one-off).
 
 Example cron:
 
@@ -91,29 +129,36 @@ func (s *SSI) DailyHistory(ctx context.Context, ticker string, from, to time.Tim
 Then add it to the chain in both `cmd/backfill` and `cmd/update`:
 
 ```go
-src := provider.NewChain(provider.NewTCBS(client), provider.NewSSI(client), vnd)
+src := provider.NewChain(vnstk, provider.NewSSI(client), provider.NewTCBS(client))
 ```
 
 SSI's deep-history feed is **FastConnect Data**, which needs a registered
-consumer ID/secret and a token — worth it if you want SSI as an authoritative
-source rather than the limited public iBoard chart endpoint.
+consumer ID/secret and a token — and, unlike VCI, can serve **raw** (unadjusted)
+prices, which is what `daily_prices` is meant to hold.
 
 ## Gotchas worth knowing
 
-- **Rate limits.** All providers share one rate-limited client. Don't raise
-  `-rps` much; these APIs throttle by IP and a full backfill is thousands of
-  requests.
+- **Adjusted vs raw prices — important.** `daily_prices` is designed to hold
+  *raw* traded prices (adjustment is computed at feature time from
+  `corporate_actions`). VCI, however, returns split/dividend-**adjusted** prices,
+  so the current feed is in tension with that invariant. This is documented, not
+  hidden; treat the stored series as adjusted until a raw feed (e.g. SSI
+  FastConnect) is wired in. Run the `quant-data-integrity` subagent on this
+  change.
 - **Price units.** Normalize everything to VND in the provider before returning
-  a `Bar`. TCBS is already VND; verify VNDirect (see above).
-- **Adjusted vs raw prices.** This stores raw traded prices. For backtesting you
-  usually want split/dividend-adjusted series — VNDirect exposes `adClose` etc.;
-  add an `adj_close` column and map it if you need it.
+  a `Bar`. `fetch.py` handles the VCI ×1000 conversion.
+- **Rate limits.** Keep `-workers` modest; VCI throttles and a full backfill is
+  thousands of requests. The vnstock path bypasses the shared `httpx` limiter.
 - **History depth.** "20 years" is aspirational: HOSE opened 2000, HNX 2005,
-  UPCOM 2009, and free APIs vary in how far back they serve. Expect most tickers
-  to start ~2006-2010.
+  UPCOM 2009, and VCI's depth varies by ticker. Expect many names to start
+  ~2010–2015.
+- **Survivorship.** The symbol listing returns only currently-LISTED names, so
+  delisted tickers are not ingested by this path — the schema keeps them
+  (`symbols.status`), but populating them needs a separate data source.
 - **Idempotency.** Upserts use `ON CONFLICT (ticker, date)`, so re-running
   backfill or overlapping the daily update never duplicates rows.
+- **Python 3.14.** Avoid for now — the only Windows numpy build available for it
+  is an experimental MinGW wheel that segfaults. Use 3.11.
 - **Responsible use.** These are public endpoints intended for personal/research
-  use. Keep request rates modest and check each provider's terms if you plan
-  anything commercial.
+  use. Keep request rates modest and check terms before anything commercial.
 ```
