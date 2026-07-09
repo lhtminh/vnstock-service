@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(docker info *)",
-      "Bash(curl -s --max-time 20 'https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker=FPT&type=stock&resolution=D&to=1720000000&countBack=3')"
-    ]
-  }
-}
