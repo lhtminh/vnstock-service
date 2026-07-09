@@ -32,6 +32,7 @@ DATA-INTEGRITY NOTES (see also README "Gotchas"):
     raw feed becomes available (e.g. licensed SSI FastConnect).
 """
 import argparse
+import datetime
 import json
 import sys
 
@@ -51,7 +52,12 @@ def fetch_history(symbol: str, start: str, end: str):
     out = []
     for _, r in df.iterrows():
         t = r["time"]
-        date = t.strftime("%Y-%m-%d") if hasattr(t, "strftime") else str(t)[:10]
+        # Expect a pandas Timestamp / datetime / date. Fail loudly on anything
+        # else rather than silently slicing str(t) into a bad date that the Go
+        # side would then drop without a trace.
+        if not isinstance(t, (datetime.datetime, datetime.date)) and not hasattr(t, "strftime"):
+            raise TypeError(f"unexpected 'time' type from VCI for {symbol}: {type(t).__name__} ({t!r})")
+        date = t.strftime("%Y-%m-%d")
         out.append(
             {
                 "date": date,

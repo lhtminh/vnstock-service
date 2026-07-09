@@ -100,6 +100,16 @@ go run ./cmd/backfill -fetch-symbols -from 2005-01-01
 go run ./cmd/update
 ```
 
+**Windows gotcha:** `go run ./cmd/update` (or any binary named `update.exe`)
+triggers Windows UAC *Installer Detection* and fails with "requires elevation".
+Build the daily command to a name that doesn't contain `update`/`install`/
+`setup`/`patch`:
+
+```powershell
+go build -o vn-refresh.exe ./cmd/update
+./vn-refresh.exe
+```
+
 Tunables: `-workers` (concurrent symbols) and `-rps`. **Note:** the vnstock path
 does not use the shared rate-limited HTTP client — each symbol spawns a
 short-lived Python process, so its request rate is bounded by `-workers`, not

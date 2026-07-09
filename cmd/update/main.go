@@ -18,8 +18,8 @@ import (
 func main() {
 	var (
 		overlap   = flag.Int("overlap-days", 7, "re-fetch this many days before the last stored date to catch corrections")
-		workers   = flag.Int("workers", 6, "number of symbols fetched concurrently")
-		reqPerSec = flag.Int("rps", 5, "global request rate limit (shared across workers)")
+		workers   = flag.Int("workers", 6, "number of symbols fetched concurrently (also the effective rate limit for the vnstock path)")
+		reqPerSec = flag.Int("rps", 5, "request rate limit for the legacy TCBS/VNDirect fallbacks only; does NOT govern the vnstock path (use -workers)")
 	)
 	flag.Parse()
 
@@ -65,7 +65,7 @@ func main() {
 					// Never seen this ticker: pull the last year as a sane default.
 					from = to.AddDate(-1, 0, 0)
 				}
-				bars, err := src.DailyHistory(ctx, sy.Ticker, from, to)
+				bars, source, err := src.DailyHistorySourced(ctx, sy.Ticker, from, to)
 				if err != nil {
 					log.Printf("[%s] fetch error: %v", sy.Ticker, err)
 					continue
@@ -73,7 +73,7 @@ func main() {
 				if len(bars) == 0 {
 					continue
 				}
-				if err := st.UpsertBars(ctx, sy.Ticker, src.Name(), bars); err != nil {
+				if err := st.UpsertBars(ctx, sy.Ticker, source, bars); err != nil {
 					log.Printf("[%s] store error: %v", sy.Ticker, err)
 					continue
 				}

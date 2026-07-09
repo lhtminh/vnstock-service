@@ -20,10 +20,10 @@ import (
 func main() {
 	var (
 		seed         = flag.String("seed", "symbols.seed.txt", "file with one ticker per line, used if the symbols table is empty and -fetch-symbols is off")
-		fetchSymbols = flag.Bool("fetch-symbols", false, "fetch the full listed universe from VNDirect instead of the seed file")
+		fetchSymbols = flag.Bool("fetch-symbols", false, "fetch the full listed universe via vnstock instead of the seed file")
 		fromStr      = flag.String("from", "2005-01-01", "earliest date to fetch (YYYY-MM-DD)")
-		workers      = flag.Int("workers", 6, "number of symbols fetched concurrently")
-		reqPerSec    = flag.Int("rps", 5, "global request rate limit (shared across workers)")
+		workers      = flag.Int("workers", 6, "number of symbols fetched concurrently (also the effective rate limit for the vnstock path)")
+		reqPerSec    = flag.Int("rps", 5, "request rate limit for the legacy TCBS/VNDirect fallbacks only; does NOT govern the vnstock path (use -workers)")
 	)
 	flag.Parse()
 
@@ -55,6 +55,11 @@ func main() {
 		if *fetchSymbols {
 			syms, err = vnstk.ListSymbols(ctx)
 			must(err)
+			// Guard against a silent partial universe if the listing API drifts
+			// (renamed field, changed exchange casing) and returns a short list.
+			if len(syms) < 500 {
+				log.Fatalf("vnstock returned only %d symbols — refusing to backfill a partial universe (likely a listing API change); investigate before proceeding", len(syms))
+			}
 			log.Printf("fetched %d symbols from vnstock", len(syms))
 		} else {
 			syms = loadSeed(*seed)
@@ -70,7 +75,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for sy := range jobs {
-				bars, err := src.DailyHistory(ctx, sy.Ticker, from, to)
+				bars, source, err := src.DailyHistorySourced(ctx, sy.Ticker, from, to)
 				if err != nil {
 					log.Printf("[%s] fetch error: %v", sy.Ticker, err)
 					continue
@@ -79,7 +84,7 @@ func main() {
 					log.Printf("[%s] no data", sy.Ticker)
 					continue
 				}
-				if err := st.UpsertBars(ctx, sy.Ticker, src.Name(), bars); err != nil {
+				if err := st.UpsertBars(ctx, sy.Ticker, source, bars); err != nil {
 					log.Printf("[%s] store error: %v", sy.Ticker, err)
 					continue
 				}
