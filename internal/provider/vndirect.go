@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"time"
 
@@ -20,7 +21,8 @@ type VNDirect struct{ http *httpx.Client }
 
 func NewVNDirect(c *httpx.Client) *VNDirect { return &VNDirect{http: c} }
 
-func (v *VNDirect) Name() string { return "vndirect" }
+func (v *VNDirect) Name() string   { return "vndirect" }
+func (v *VNDirect) Adjusted() bool { return true }
 
 // If finfo already returns VND keep 1.0; if it returns thousands, set 1000.
 const vndPriceScale = 1.0
@@ -61,6 +63,7 @@ func (v *VNDirect) DailyHistory(ctx context.Context, ticker string, from, to tim
 		for _, d := range r.Data {
 			day, err := time.Parse("2006-01-02", d.Date)
 			if err != nil {
+				log.Printf("vndirect %s: skipping bar with unparseable date %q: %v", ticker, d.Date, err)
 				continue
 			}
 			seen[d.Date] = Bar{

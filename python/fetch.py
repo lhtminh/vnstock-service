@@ -34,6 +34,7 @@ DATA-INTEGRITY NOTES (see also README "Gotchas"):
 import argparse
 import datetime
 import json
+import math
 import sys
 
 PRICE_SCALE = 1000.0  # VCI quotes in thousands of VND -> VND
@@ -61,11 +62,11 @@ def fetch_history(symbol: str, start: str, end: str):
         out.append(
             {
                 "date": date,
-                "open": round(float(r["open"]) * PRICE_SCALE, 2),
-                "high": round(float(r["high"]) * PRICE_SCALE, 2),
-                "low": round(float(r["low"]) * PRICE_SCALE, 2),
-                "close": round(float(r["close"]) * PRICE_SCALE, 2),
-                "volume": int(r["volume"]),
+                "open": 0.0 if math.isnan(r["open"]) else round(float(r["open"]) * PRICE_SCALE, 2),
+                "high": 0.0 if math.isnan(r["high"]) else round(float(r["high"]) * PRICE_SCALE, 2),
+                "low": 0.0 if math.isnan(r["low"]) else round(float(r["low"]) * PRICE_SCALE, 2),
+                "close": 0.0 if math.isnan(r["close"]) else round(float(r["close"]) * PRICE_SCALE, 2),
+                "volume": 0 if math.isnan(r["volume"]) else int(r["volume"]),
             }
         )
     out.sort(key=lambda b: b["date"])

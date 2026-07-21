@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,29 +13,34 @@ import (
 	"time"
 )
 
-// VNStock fetches daily OHLCV by shelling out to the Python `vnstock` library
-// (python/fetch.py), which reads the VCI (Vietcap) feed. We go through vnstock
-// because the direct TCBS/VNDirect HTTP endpoints are no longer usable: TCBS
-// IP-blocks non-allowlisted egress (blanket 404) and VNDirect's finfo API was
-// decommissioned (hostname resolves to a private 10.x IP). See README.
+// VNStock is the PRIMARY provider. It shells out to a Python script
+// (python/fetch.py) that uses the `vnstock` library to read VCI (Vietcap).
 //
-// Normalization happens in fetch.py (VCI quotes in thousands -> VND), so a Bar
-// returned here is already in VND, satisfying the "normalize in the provider"
-// invariant. NOTE: VCI history is split/dividend-ADJUSTED, not raw — see the
-// data-integrity caveat in fetch.py / README before treating it as raw.
+// Why not call VCI directly in Go?
+// The Go code used to call TCBS and VNDirect directly via HTTP, but both died:
+//   - TCBS IP-blocks non-allowlisted traffic → blanket 404
+//   - VNDirect was decommissioned → hostname resolves to private 10.x IP
+// vnstock is a maintained Python library that still has a working VCI feed.
 //
-// Unlike the HTTP providers, this one does NOT use the shared httpx client, so
-// its request rate is governed by the worker-pool size (-workers), not -rps.
-// Keep -workers modest; each call also spawns a short-lived Python process.
+// Performance note: each call spawns a fresh Python process (imports pandas,
+// numpy, etc.), which takes ~5-15 seconds. That's why the backfill is slow.
+// The benefit is we don't need to maintain HTTP parsing for a third broker API.
+//
+// Price normalization (VCI returns thousands of VND → we multiply by 1000)
+// happens inside fetch.py, so bars returned here are already in VND.
+// VCI prices are split/dividend-ADJUSTED (see the data-integrity caveat).
 type VNStock struct {
-	python string // path to the Python interpreter
-	script string // path to fetch.py
+	python string // path to the Python interpreter (e.g. .venv/Scripts/python.exe)
+	script string // path to fetch.py (e.g. python/fetch.py)
 }
 
-// NewVNStock locates the interpreter and helper script. Both can be overridden
-// with VNSTOCK_PYTHON / VNSTOCK_SCRIPT; otherwise it prefers the repo-local
-// .venv and python/fetch.py (resolved from the current working directory, i.e.
-// the repo root, matching how the cmd/* binaries are run).
+// NewVNStock finds the Python interpreter and fetch.py script.
+// Two env vars override the defaults:
+//   VNSTOCK_PYTHON — path to the Python executable
+//   VNSTOCK_SCRIPT — path to fetch.py
+// Otherwise it looks for .venv/Scripts/python.exe (Windows) or .venv/bin/python
+// (Linux/Mac) relative to the current directory. This is why you must always
+// run the backfill/update commands from the repo root.
 func NewVNStock() (*VNStock, error) {
 	py := os.Getenv("VNSTOCK_PYTHON")
 	if py == "" {
@@ -50,9 +56,16 @@ func NewVNStock() (*VNStock, error) {
 	return &VNStock{python: py, script: script}, nil
 }
 
-func (v *VNStock) Name() string { return "vnstock" }
+func (v *VNStock) Name() string   { return "vnstock" }
+func (v *VNStock) Adjusted() bool { return true }
 
 // DailyHistory runs `fetch.py history` and decodes the JSON it writes.
+// The flow is:
+//   1. Build command-line args (symbol, date range) for fetch.py
+//   2. v.run() spawns Python, writes JSON to a temp file
+//   3. Parse each JSON record, skip any with unparseable dates
+//   4. Sort ascending by date (the Go side always sorts — belt and suspenders)
+//   5. Return []Bar already in VND
 func (v *VNStock) DailyHistory(ctx context.Context, ticker string, from, to time.Time) ([]Bar, error) {
 	var recs []struct {
 		Date   string  `json:"date"`
@@ -73,6 +86,7 @@ func (v *VNStock) DailyHistory(ctx context.Context, ticker string, from, to time
 	for _, r := range recs {
 		day, err := time.Parse("2006-01-02", r.Date)
 		if err != nil {
+			log.Printf("vnstock %s: skipping bar with unparseable date %q: %v", ticker, r.Date, err)
 			continue
 		}
 		bars = append(bars, Bar{

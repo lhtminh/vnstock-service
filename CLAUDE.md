@@ -18,18 +18,26 @@ models (trend, liquidity, behaviour, alpha). Two entry points: a one-time
   `vnstock.go` (**primary** — bridges to `python/fetch.py`, which reads VCI/Vietcap
   via the `vnstock` library; also supplies the symbol universe), `tcbs.go` /
   `vndirect.go` (legacy HTTP sources, currently non-functional — see "sources"
-  below — kept in the chain as fallbacks), `chain.go` (tries providers in order,
-  first non-empty wins; use `DailyHistorySourced` to record which provider served
-  in the `source` column). Add a source by implementing `Provider`; do not
-  special-case sources in callers.
+  below — kept for when they recover; NOT in the current chain to avoid 3000
+  wasted HTTP requests per run), `chain.go` (tries providers in order, first
+  non-empty wins; use `DailyHistorySourced` to record which provider served in
+  the `source` column). Every `Provider` must implement `Adjusted() bool` to
+  declare whether it returns split/dividend-adjusted prices. Add a source by
+  implementing `Provider`; do not special-case sources in callers — use
+  `Chain.ProviderAdjusted(source)` instead of hardcoded name checks.
 - `python/fetch.py` — the vnstock bridge. Emits OHLCV / symbol JSON to a `--out`
   file (NOT stdout, which vnstock pollutes with promo banners) and normalizes
-  VCI's thousands-of-VND to VND. Runs in a repo-local `./.venv` (Python 3.11).
-- `internal/httpx/` — ONE shared rate-limited HTTP client with retry/backoff.
-  Governs the legacy TCBS/VNDirect providers; the vnstock path does NOT use it.
+  VCI's thousands-of-VND to VND. NaN-guarded on all OHLCV fields. Runs in a
+  repo-local `./.venv` (Python 3.11).
+- `internal/httpx/` — ONE shared rate-limited HTTP client with retry/backoff and
+  timer-safe backoff (no `time.After` leaks). Governs the legacy TCBS/VNDirect
+  providers if re-added; the vnstock path does NOT use it.
 - `internal/store/` — pgx/pgxpool persistence. `schema.sql` is embedded and run
-  by `EnsureSchema`.
+  by `EnsureSchema`, which skips DDL on subsequent starts via `_schema_version`
+  caching to avoid `ACCESS EXCLUSIVE` locks. Backfill runs are tracked in
+  `backfill_runs` — a row with NULL `completed_at` means the run was interrupted.
 - `cmd/backfill`, `cmd/update` — orchestration (worker pool over symbols).
+  Both use `signal.NotifyContext` for clean shutdown on SIGINT/SIGTERM.
 
 ## Invariants — do NOT violate these
 
@@ -42,12 +50,15 @@ models (trend, liquidity, behaviour, alpha). Two entry points: a one-time
    from the `corporate_actions` table. Do not add a stored adjusted-price column
    — adjustment factors change with every new action and would silently mutate
    history, breaking reproducibility.
-   ⚠ **KNOWN GAP:** the current primary feed (VCI via vnstock) returns
-   split/dividend-**adjusted** prices, so `daily_prices` presently holds adjusted
-   data — in tension with this invariant. Until a raw feed (e.g. SSI FastConnect)
-   is wired in, treat the stored series as adjusted. Proposed mitigation is an
-   additive `is_adjusted` flag; do NOT "resolve" this by adding a mutating
-   `adj_close`.
+     ⚠ **KNOWN GAP:** the current primary feed (VCI via vnstock) returns
+     split/dividend-**adjusted** prices, so `daily_prices` presently holds adjusted
+     data — in tension with this invariant. Until a raw feed (e.g. SSI FastConnect)
+     is wired in, treat the stored series as adjusted. An additive `is_adjusted`
+     BOOLEAN column (default `true`) now exists on `daily_prices` to mark this —
+     VCI bars are stored with `is_adjusted = true`; a raw feed (SSI) passes
+     `false`. Every `Provider` implements `Adjusted() bool`, and callers use
+     `Chain.ProviderAdjusted(source)` to determine the value — no hardcoded
+     name checks. Do NOT "resolve" this by adding a mutating `adj_close`.
 3. **Point-in-time correctness.** `financial_statements.publish_date` and
    `index_membership.effective_date`/`end_date` exist to prevent look-ahead.
    Any feature query MUST filter by "knowable as of date D"
@@ -60,10 +71,12 @@ models (trend, liquidity, behaviour, alpha). Two entry points: a one-time
    yet built).
 5. **One shared rate-limited client.** The HTTP providers (TCBS/VNDirect) share
    the single `httpx.Client`; do not create per-provider clients or raise `-rps`
-   casually — these APIs throttle by IP. The vnstock provider spawns a Python
-   subprocess per call and does NOT go through `httpx`, so its effective rate is
-   bounded by `-workers`, not `-rps`; keep `-workers` modest (~3–6) to avoid VCI
-   throttling.
+   casually — these APIs throttle by IP. Currently TCBS/VNDirect are NOT in the
+   chain (they are dead), so the `-rps` flag has been removed. Re-add them by
+   passing the client to `NewTCBS(client)` / `NewVNDirect(client)` in both
+   commands. The vnstock provider spawns a Python subprocess per call and does
+   NOT go through `httpx`, so its effective rate is bounded by `-workers` alone;
+   keep `-workers` modest (~3–6) to avoid VCI throttling.
 6. **Upserts are idempotent** (`ON CONFLICT`). Keep them that way so re-running
    backfill or overlapping the daily update never duplicates rows.
 7. **`schema.sql` must stay idempotent and additive** (`CREATE TABLE IF NOT
@@ -123,9 +136,10 @@ Windows: `go run ./cmd/update` produces `update.exe`, which trips UAC installer
 detection ("requires elevation"). Build to a safe name instead:
 `go build -o vn-refresh.exe ./cmd/update && ./vn-refresh.exe`.
 
-Flags — backfill: `-from`, `-seed`, `-fetch-symbols`, `-workers`, `-rps`.
-Flags — update: `-overlap-days`, `-workers`, `-rps`. `-rps` governs only the
-legacy HTTP providers; the vnstock path is bounded by `-workers` (keep ~3–6).
+Flags — backfill: `-from`, `-seed`, `-fetch-symbols`, `-workers`.
+Flags — update: `-overlap-days`, `-workers`.
+`-rps` was removed since TCBS/VNDirect are not in the chain. The vnstock path
+is bounded by `-workers` (keep ~3–6).
 
 Pre-commit checks:
 
@@ -133,7 +147,7 @@ Pre-commit checks:
 gofmt -w .          # format
 go vet ./...        # static checks
 go build ./...      # must compile
-go test ./...       # NOTE: no *_test.go files exist yet — this currently runs nothing
+go test ./...       # 10 tests in internal/provider (chain + vnstock decoding)
 ```
 
 Validate the schema in isolation (this is what proves the idempotent upgrade
@@ -156,10 +170,11 @@ Verify the data source before a big backfill (the vnstock/VCI path):
 
 ## Current status
 
-Built and working: vnstock/VCI provider (via `python/fetch.py`) as primary with
-TCBS/VNDirect as (currently dead) fallbacks, rate-limited client, Postgres store
-with idempotent upserts, v2 quant-ready schema (8 tables), backfill + update
-commands. Verified end-to-end: ~91k bars for the 26-symbol seed set, 2006→2026.
+Built and working: vnstock/VCI provider (via `python/fetch.py`) as the sole
+source (TCBS/VNDirect removed from chain — they are dead), NaN-guarded Python
+bridge, Postgres store with idempotent upserts, v2 quant-ready schema (10
+tables), signal-safe context handling, schema version caching, backfill run
+tracking, and 10 tests for chain fallback + vnstock JSON decode.
 
 NOT yet built (the schema supports these; the writers do not exist):
 - Store methods + provider calls for `corporate_actions`, `foreign_flows`,
@@ -171,10 +186,8 @@ NOT yet built (the schema supports these; the writers do not exist):
 - Delisted-ticker ingestion (survivorship data path).
 - A `cmd/probe` coverage check (proposed) to report earliest available date per
   source before a full backfill.
-- Automated tests. There are no `*_test.go` files yet; `go test ./...` runs
-  nothing. Good first targets: `vnstock.go` JSON decode into `Bar` (fixture
-  table tests incl. the ×1000 scale) + `fetch.py`'s error path, and `UpsertBars`
-  idempotency against a test DB.
+- More tests: store idempotency against a test DB, `fetch.py` error paths, and
+  the full backfill end-to-end.
 
 ## Conventions
 

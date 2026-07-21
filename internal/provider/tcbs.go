@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -20,7 +21,8 @@ type TCBS struct{ http *httpx.Client }
 
 func NewTCBS(c *httpx.Client) *TCBS { return &TCBS{http: c} }
 
-func (t *TCBS) Name() string { return "tcbs" }
+func (t *TCBS) Name() string   { return "tcbs" }
+func (t *TCBS) Adjusted() bool { return true }
 
 const tcbsBase = "https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term"
 
@@ -57,6 +59,7 @@ func (t *TCBS) DailyHistory(ctx context.Context, ticker string, from, to time.Ti
 		for _, d := range r.Data {
 			ts, err := time.Parse(time.RFC3339, d.TradingDate)
 			if err != nil {
+				log.Printf("tcbs %s: skipping bar with unparseable date %q: %v", ticker, d.TradingDate, err)
 				continue
 			}
 			day := ts.UTC().Truncate(24 * time.Hour)

@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS daily_prices (
     ceiling_price  NUMERIC(18, 2),          -- price-limit band (HOSE +7% etc.)
     floor_price    NUMERIC(18, 2),
     bar_status     TEXT,                    -- normal/limit_up/limit_down/halted/no_trade/unknown
+    is_adjusted    BOOLEAN NOT NULL DEFAULT true,  -- VCI feed is split/dividend-ADJUSTED; a true raw feed (e.g. SSI) would set false
     source         TEXT,
     ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (ticker, date)
@@ -79,6 +80,7 @@ ALTER TABLE daily_prices ADD COLUMN IF NOT EXISTS ref_price     NUMERIC(18, 2);
 ALTER TABLE daily_prices ADD COLUMN IF NOT EXISTS ceiling_price NUMERIC(18, 2);
 ALTER TABLE daily_prices ADD COLUMN IF NOT EXISTS floor_price   NUMERIC(18, 2);
 ALTER TABLE daily_prices ADD COLUMN IF NOT EXISTS bar_status    TEXT;
+ALTER TABLE daily_prices ADD COLUMN IF NOT EXISTS is_adjusted   BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE daily_prices ADD COLUMN IF NOT EXISTS ingested_at   TIMESTAMPTZ NOT NULL DEFAULT now();
 
 CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices (date);
@@ -178,3 +180,26 @@ CREATE TABLE IF NOT EXISTS index_membership (
     PRIMARY KEY (index_code, ticker, effective_date)
 );
 CREATE INDEX IF NOT EXISTS idx_index_membership_asof ON index_membership (index_code, effective_date, end_date);
+
+-- ---------------------------------------------------------------------------
+-- backfill_runs: tracks backfill runs so consumers can detect a partial dataset
+-- caused by a crash mid-backfill. A row with completed_at IS NULL means the
+-- run was interrupted — treat data from that run as suspect.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS backfill_runs (
+    id             BIGSERIAL PRIMARY KEY,
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at   TIMESTAMPTZ,
+    symbol_count   INT,
+    bar_count      BIGINT,
+    worker_count   INT
+);
+
+-- ---------------------------------------------------------------------------
+-- _schema_version: tracks applied schema version so EnsureSchema can skip DDL
+-- on repeated startups, avoiding unnecessary ACCESS EXCLUSIVE locks.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS _schema_version (
+    version     INT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

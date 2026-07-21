@@ -154,9 +154,10 @@ prices, which is what `daily_prices` is meant to hold.
   *raw* traded prices (adjustment is computed at feature time from
   `corporate_actions`). VCI, however, returns split/dividend-**adjusted** prices,
   so the current feed is in tension with that invariant. This is documented, not
-  hidden; treat the stored series as adjusted until a raw feed (e.g. SSI
-  FastConnect) is wired in. Run the `quant-data-integrity` subagent on this
-  change.
+  hidden; `daily_prices` now carries an `is_adjusted` BOOLEAN column (default
+  `true`) that flags this — treat the stored series as adjusted until a raw feed
+  (e.g. SSI FastConnect) is wired in and sets it `false`. Run the
+  `quant-data-integrity` subagent on this change.
 - **Price units.** Normalize everything to VND in the provider before returning
   a `Bar`. `fetch.py` handles the VCI ×1000 conversion.
 - **Rate limits.** Keep `-workers` modest; VCI throttles and a full backfill is
